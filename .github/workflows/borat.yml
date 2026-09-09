@@ -1,0 +1,94 @@
+name: borat-bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: "Custom line (leave empty for a random one)"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+
+permissions: {} # no GITHUB_TOKEN needed
+
+concurrency:
+  group: borat-bot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Build payload
+        env:
+          # never inline ${{ inputs.* }} into a run script -> shell injection
+          CUSTOM_MESSAGE: ${{ inputs.message }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          LINES=(
+            "Very nice! Great success!"
+            "This pipeline is number one pipeline in all of Kazakhstan."
+            "My build, she is green. High five!"
+            "I like. You like? We ship."
+          )
+
+          # direct .gif / .png links only (see README notes)
+          GIFS=(
+            "https://media.tenor.com/REPLACE_ME_1.gif"
+            "https://media.tenor.com/REPLACE_ME_2.gif"
+            "https://media.tenor.com/REPLACE_ME_3.gif"
+          )
+
+          TEXT="${CUSTOM_MESSAGE:-}"
+          [ -z "$TEXT" ] && TEXT="${LINES[$RANDOM % ${#LINES[@]}]}"
+          GIF="${GIFS[$RANDOM % ${#GIFS[@]}]}"
+
+          jq -n \
+            --arg text "$TEXT" \
+            --arg gif "$GIF" \
+            --arg actor "$ACTOR" \
+            --arg repo "$REPO" \
+            --arg url "$RUN_URL" \
+            '{
+              username: "Borat",
+              content: $text,
+              allowed_mentions: { parse: [] },
+              embeds: [{
+                title: $repo,
+                url: $url,
+                description: "Triggered by \($actor)",
+                color: 16766720,
+                image: { url: $gif },
+                footer: { text: "GitHub Actions" }
+              }]
+            }' > payload.json
+
+      - name: Send to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_WEBHOOK:-}" ]; then
+            echo "::error::DISCORD_WEBHOOK secret is not set"
+            exit 1
+          fi
+
+          code=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
+            --retry 3 --retry-delay 2 --retry-all-errors \
+            -H "Content-Type: application/json" \
+            -X POST "$DISCORD_WEBHOOK" \
+            --data @payload.json)
+
+          echo "Discord responded: $code"
+          if [ "$code" -ge 300 ]; then
+            cat /tmp/resp.txt
+            exit 1
+          fi
